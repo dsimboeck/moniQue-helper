@@ -1,5 +1,5 @@
 import typer
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from typing_extensions import Annotated
 from rich.progress import track, Progress
 import os
@@ -7,7 +7,7 @@ from enum import Enum
 from monique_helper.terramesh import MeshGrid
 from monique_helper.io import load_tile_json, load_terrain, save_tif, save_png, load_gtif
 from monique_helper.transforms import alzeka2rot, R_ori2cv, alpha2azi
-from monique_helper.geom import plane_from_camera, img2square
+from monique_helper.geom import plane_from_camera, img2square, nameTagGeom
 from osgeo import gdal, osr, ogr
 import json
 import string
@@ -24,7 +24,6 @@ import imageio.v3 as iio
 
 class MeshSimplification(str, Enum):
     delatin = "delatin"
-
 
 app = typer.Typer()
 
@@ -394,12 +393,13 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
                 cam: Annotated[Optional[List[str]], typer.Option(help="Name of the cameras to create output for.")] = None,
                 dist_range: Annotated[Tuple[int, int, int], typer.Option(help="Distance of the historical image from the camera.")] = (100, 10000, 100),
                 width: Annotated[int, typer.Option(help="Width in px of the output rendering. If None the width of the oriented image will be used.")] = 1080,
-                height: Annotated[int, typer.Option(help="Height in px of the output rendering. If None the width of the oriented image will be used.")] = 1080):
+                height: Annotated[int, typer.Option(help="Height in px of the output rendering. If None the width of the oriented image will be used.")] = 1080,
+                name_tag: Annotated[Optional[List[str]], typer.Option(help="Add a name tag as 'lat,lon,name'. Can be used multiple times.")] = None):
     
     logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monique_helper", "myalpics_logo_black_text_trans_200px.png")
     logo_arr = np.array(Image.open(logo_path))
     
-    logo_alpha = logo_arr[:, :, -1]
+    logo_alpha = logo_arr[:, :, -1] 
     logo_alpha[logo_alpha > 0] = 255
     logo_alpha = logo_alpha / 255.
     
@@ -445,7 +445,7 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
     
     print("Loading terrain...")
     tiles_data = load_tile_json(tiles_json)
-    gfx_terrain, _ = load_terrain(tiles_data)
+    gfx_terrain, o3d_scene = load_terrain(tiles_data)
     gfx_scene.add(gfx_terrain)
         
     for cid, data in cam_dict.items():
@@ -489,15 +489,31 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
         gfx_camera.local.rotation_matrix = rmat_gfx
         
         dist_range = np.arange(dist_range[0], dist_range[1]+dist_range[2], dist_range[2])
-       
+
+        if name_tag:
+            tiles_epsg = tiles_data["epsg"]
+            min_xyz=np.array(tiles_data["min_xyz"])
+            min_xy = min_xyz.copy()
+            min_xy[-1] = 0 
+            
+            for ntag in name_tag:
+                lat_str, lon_str, name = ntag.split(",", 2)
+                lat = float(lat_str.strip())
+                lon = float(lon_str.strip())
+                name = name.strip()
+                    
+                ntag_line, ntag_text = nameTagGeom(lat, lon, name, tiles_epsg, min_xy, o3d_scene)
+                gfx_scene.add(ntag_line)
+                gfx_scene.add(ntag_text)
+            
         frames = []
-        
+
         with Progress() as progress:
             
             task1 = progress.add_task("...rendering frames.", total=len(dist_range))
 
             for dx, dist in enumerate(dist_range):
-                plane_mesh = plane_from_camera(data, img_arr, dist_plane=dist, min_xyz=np.array(tiles_data["min_xyz"]))
+                plane_mesh = plane_from_camera(data, img_arr, dist_plane=dist, min_xyz=min_xyz)
                 gfx_scene.add(plane_mesh)
 
                 offscreen_canvas.request_draw(offscreen_renderer.render(gfx_scene, gfx_camera))
