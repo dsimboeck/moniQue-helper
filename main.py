@@ -21,6 +21,7 @@ import base64
 from io import BytesIO
 import pandas as pd
 import imageio.v3 as iio
+import math
 
 class MeshSimplification(str, Enum):
     delatin = "delatin"
@@ -391,10 +392,10 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
                 out_dir: Annotated[str, typer.Argument(help="Path to save the .gif file. Must include the exeension.")],
                 padding:Annotated[float, typer.Option(help="Padding around historical image extent.")] = 1,
                 cam: Annotated[Optional[List[str]], typer.Option(help="Name of the cameras to create output for.")] = None,
-                dist_range: Annotated[Tuple[int, int, int], typer.Option(help="Distance of the historical image from the camera.")] = (100, 10000, 100),
+                dist_range: Annotated[Tuple[int, int, int, int], typer.Option(help="Rendering distance and step width; syntax: start stop min_step max_step")] = (1, 10000, 5, 500),
                 width: Annotated[int, typer.Option(help="Width in px of the output rendering. If None the width of the oriented image will be used.")] = 1080,
                 height: Annotated[int, typer.Option(help="Height in px of the output rendering. If None the width of the oriented image will be used.")] = 1080,
-                name_tag: Annotated[Optional[List[str]], typer.Option(help="Add a name tag as 'lat,lon,name'. Can be used multiple times.")] = None):
+                name_tag: Annotated[Optional[List[str]], typer.Option(help="Add a name tag to rendering; syntax: 'lat,lon,tag_hight,name'; Can be used multiple times.")] = None):
     
     logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monique_helper", "myalpics_logo_black_text_trans_200px.png")
     logo_arr = np.array(Image.open(logo_path))
@@ -487,8 +488,6 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
             
         gfx_camera.local.position = prc_local
         gfx_camera.local.rotation_matrix = rmat_gfx
-        
-        dist_range = np.arange(dist_range[0], dist_range[1]+dist_range[2], dist_range[2])
 
         if name_tag:
             tiles_epsg = tiles_data["epsg"]
@@ -497,44 +496,69 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
             min_xy[-1] = 0 
             
             for ntag in name_tag:
-                lat_str, lon_str, name = ntag.split(",", 2)
+                lat_str, lon_str, v_pos_str, name = ntag.split(",", 3)
                 lat = float(lat_str.strip())
                 lon = float(lon_str.strip())
+                v_pos = float(v_pos_str.strip())
                 name = name.strip()
                     
-                ntag_line, ntag_text = nameTagGeom(lat, lon, name, tiles_epsg, min_xy, o3d_scene)
+                ntag_line, ntag_text = nameTagGeom(lat, lon, v_pos, name, tiles_epsg, min_xy, o3d_scene)
                 gfx_scene.add(ntag_line)
                 gfx_scene.add(ntag_text)
             
+        start_distance = dist_range[0]
+        end_distance = dist_range[1]
+        min_step = dist_range[2]
+        max_step = dist_range[3]
+
+        def get_step_lin(distance):
+            normalized = (distance - start_distance) / (end_distance - start_distance)
+            return min_step + (max_step - min_step) * normalized**2
+        
+        def get_step_log(distance):
+            normalized = max((distance - start_distance) / (end_distance - start_distance), 1e-6)
+            log_norm = math.log10(1 + 9 * normalized)
+            step = min_step + (max_step - min_step) * log_norm
+            return max(min_step, min(step, max_step))
+        
+        def get_step_exp(distance):
+            normalized = (distance - start_distance) / (end_distance - start_distance)
+            base = 5.0
+            exp_norm = (base ** normalized - 1) / (base - 1)
+            step = min_step + (max_step - min_step) * exp_norm
+            return max(min_step, min(step, max_step))
+
+        dist_range_variable = []
+        current_dist = start_distance
+        while current_dist <= end_distance:
+            dist_range_variable.append(current_dist)
+            current_dist += get_step_exp(current_dist)
+
+        dist_range_variable += dist_range_variable[::-1][1:-1]
+
         frames = []
 
         with Progress() as progress:
-            
-            task1 = progress.add_task("...rendering frames.", total=len(dist_range))
+            task1 = progress.add_task("...rendering frames.", total=len(dist_range_variable))
 
-            for dx, dist in enumerate(dist_range):
+            for dx, dist in enumerate(dist_range_variable):
                 plane_mesh = plane_from_camera(data, img_arr, dist_plane=dist, min_xyz=min_xyz)
                 gfx_scene.add(plane_mesh)
 
                 offscreen_canvas.request_draw(offscreen_renderer.render(gfx_scene, gfx_camera))
                 img_scene_with_arr = np.asarray(offscreen_canvas.draw())[:,:,:3]
-                
+
                 img_scene_with_arr[-logo_h:, -logo_w:, 0] = (logo_arr[:, :, 0] * logo_alpha + img_scene_with_arr[-logo_h:, -logo_w:, 0] * (1 - logo_alpha)).astype(np.uint8)
                 img_scene_with_arr[-logo_h:, -logo_w:, 1] = (logo_arr[:, :, 1] * logo_alpha + img_scene_with_arr[-logo_h:, -logo_w:, 1] * (1 - logo_alpha)).astype(np.uint8)
                 img_scene_with_arr[-logo_h:, -logo_w:, 2] = (logo_arr[:, :, 2] * logo_alpha + img_scene_with_arr[-logo_h:, -logo_w:, 2] * (1 - logo_alpha)).astype(np.uint8)
-                
+
                 frames.append(img_scene_with_arr)
                 gfx_scene.remove(plane_mesh)
-                
+
                 progress.update(task1, advance=1)
-        
-                
-        frames_reverse = frames[::-1]
-        frames_total = frames + frames_reverse
-        
+
         print(f"...saving {gif_path}")
-        iio.imwrite(gif_path, frames_total, duration=50)
-        
+        iio.imwrite(gif_path, frames, duration=50, loop=1)
         print("...done!")
         
     

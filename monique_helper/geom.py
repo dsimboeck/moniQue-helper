@@ -49,7 +49,7 @@ def img2square(pil_img, background_color):
         result.paste(pil_img, ((height - width) // 2, 0))
         return result
     
-def nameTagGeom(lat, lon, name, tiles_epsg, min_xy, o3d_scene):
+def nameTagGeom(lat, lon, v_pos, name, tiles_epsg, min_xy, o3d_scene):
 
     transformer = Transformer.from_crs("EPSG:4326", tiles_epsg, always_xy=True)
     x, y = transformer.transform(lon, lat)
@@ -57,10 +57,10 @@ def nameTagGeom(lat, lon, name, tiles_epsg, min_xy, o3d_scene):
     local_pos_bottom = np.array([x, y, 0]) - min_xy
     local_pos_top = local_pos_bottom + np.array([0, 0, 10000])
     local_pos_terrain = raycast_terrain(local_pos_bottom, local_pos_top, o3d_scene)
-    ntag_pos = local_pos_terrain + np.array([0,0,100])
+    ntag_pos = local_pos_terrain + np.array([0,0,v_pos])
 
     positions = np.array([local_pos_terrain, ntag_pos], dtype=np.float32)
-    ntag_line = gfx.Line(gfx.Geometry(positions=positions), gfx.LineMaterial(thickness=4.0, color="#4682B4", opacity=1))
+    ntag_line = gfx.Line(gfx.Geometry(positions=positions), gfx.LineMaterial(thickness=4.0, color="#DAA520", opacity=1))
 
     ntag_geom = gfx.Geometry(positions=ntag_pos.astype(np.float32).reshape(1, 3))
     ntag_obj = gfx.Points(ntag_geom, gfx.PointsMaterial(color="#4682B4", size=3))        
