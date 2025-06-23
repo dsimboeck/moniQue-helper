@@ -21,6 +21,7 @@ import base64
 from io import BytesIO
 import pandas as pd
 import imageio.v3 as iio
+import imageio
 import math
 
 class MeshSimplification(str, Enum):
@@ -489,12 +490,12 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
         gfx_camera.local.position = prc_local
         gfx_camera.local.rotation_matrix = rmat_gfx
 
-        if name_tag:
-            tiles_epsg = tiles_data["epsg"]
-            min_xyz=np.array(tiles_data["min_xyz"])
-            min_xy = min_xyz.copy()
-            min_xy[-1] = 0 
-            
+        tiles_epsg = tiles_data["epsg"]
+        min_xyz=np.array(tiles_data["min_xyz"])
+        min_xy = min_xyz.copy()
+        min_xy[-1] = 0 
+
+        if name_tag:  
             for ntag in name_tag:
                 lat_str, lon_str, v_pos_str, name = ntag.split(",", 3)
                 lat = float(lat_str.strip())
@@ -511,15 +512,15 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
         min_step = dist_range[2]
         max_step = dist_range[3]
 
-        def get_step_lin(distance):
-            normalized = (distance - start_distance) / (end_distance - start_distance)
-            return min_step + (max_step - min_step) * normalized**2
+        # def get_step_lin(distance):
+        #     normalized = (distance - start_distance) / (end_distance - start_distance)
+        #     return min_step + (max_step - min_step) * normalized**2
         
-        def get_step_log(distance):
-            normalized = max((distance - start_distance) / (end_distance - start_distance), 1e-6)
-            log_norm = math.log10(1 + 9 * normalized)
-            step = min_step + (max_step - min_step) * log_norm
-            return max(min_step, min(step, max_step))
+        # def get_step_log(distance):
+        #     normalized = max((distance - start_distance) / (end_distance - start_distance), 1e-6)
+        #     log_norm = math.log10(1 + 9 * normalized)
+        #     step = min_step + (max_step - min_step) * log_norm
+        #     return max(min_step, min(step, max_step))
         
         def get_step_exp(distance):
             normalized = (distance - start_distance) / (end_distance - start_distance)
@@ -558,7 +559,12 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
                 progress.update(task1, advance=1)
 
         print(f"...saving {gif_path}")
-        iio.imwrite(gif_path, frames, duration=50, loop=1)
+        #iio.imwrite(gif_path, frames, duration=50, loop=1)
+
+        mp4_path = gif_path.replace('.gif', '.mp4')
+        with imageio.get_writer(mp4_path, fps=30) as writer:
+            for frame in frames:
+                writer.append_data(frame)
         print("...done!")
         
     
