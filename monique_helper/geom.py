@@ -49,7 +49,7 @@ def img2square(pil_img, background_color):
         result.paste(pil_img, ((height - width) // 2, 0))
         return result
     
-def nameTagGeom(lat, lon, v_pos, name, tiles_epsg, min_xy, o3d_scene):
+def nameTagGeom(lat, lon, v_pos, name, font_size, tiles_epsg, min_xy, o3d_scene):
 
     transformer = Transformer.from_crs("EPSG:4326", tiles_epsg, always_xy=True)
     x, y = transformer.transform(lon, lat)
@@ -67,7 +67,7 @@ def nameTagGeom(lat, lon, v_pos, name, tiles_epsg, min_xy, o3d_scene):
     ntag_text = gfx.Text(geometry=None,
                           material=gfx.TextMaterial(color="#000", outline_color="#fff", outline_thickness=0.25),
                           markdown="**%s**" % (name), 
-                          font_size=20, 
+                          font_size=font_size, 
                           anchor="Bottom-Center", 
                           screen_space=True)
     ntag_text.local.position = ntag_pos

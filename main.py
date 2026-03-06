@@ -376,8 +376,8 @@ def render_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpkg
                                 "zeta":euler[1],
                                 "kappa":euler[2],
                                 "f":ior[2],                         
-                                "archive":data["archiv"] if "archiv" in list(data.keys()) else None,
-                                "copy": data["copy"] if "copy" in list(data.keys()) else None,
+                                "archive":data["archiv"] if "archiv" in list(data.keys()) else "AKON (OenB)",
+                                "copy": data["copy"] if "copy" in list(data.keys()) else "AKON/Österreichische Nationalbibliothek",
                                 "von":"%s-01-01" % (data["jahr"]) if "jahr" in list(data.keys()) else "1111-01-01",
                                 "bis":"%s-12-31" % (data["jahr"]) if "jahr" in list(data.keys()) else "1111-12-31"})
     
@@ -390,7 +390,7 @@ def render_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpkg
 
 @app.command()            
 def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpkg containing the oriented cameras.")],
-                out_dir: Annotated[str, typer.Argument(help="Path to save the .gif file. Must include the exeension.")],
+                out_dir: Annotated[str, typer.Argument(help="Path to save the .mp4 file. Must include the exeension.")],
                 padding:Annotated[float, typer.Option(help="Padding around historical image extent.")] = 1,
                 cam: Annotated[Optional[List[str]], typer.Option(help="Name of the cameras to create output for.")] = None,
                 dist_range: Annotated[Tuple[int, int, int, int], typer.Option(help="Rendering distance and step width; syntax: start stop min_step max_step")] = (1, 10000, 5, 500),
@@ -456,7 +456,7 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
             if cid not in cam:
                 continue
         
-        gif_path = os.path.join(out_dir, f"{cid}.gif")
+        mp4_path = os.path.join(out_dir, f"{cid}.mp4")
         
         print("...rendering %s." % (cid))
         prc = np.array([data["obj_x0"], data["obj_y0"], data["obj_z0"]]) 
@@ -497,13 +497,14 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
 
         if name_tag:  
             for ntag in name_tag:
-                lat_str, lon_str, v_pos_str, name = ntag.split(",", 3)
+                lat_str, lon_str, v_pos_str, name, font_size_str = ntag.split(",", 4)
                 lat = float(lat_str.strip())
                 lon = float(lon_str.strip())
                 v_pos = float(v_pos_str.strip())
+                font_size = float(font_size_str.strip())
                 name = name.strip()
                     
-                ntag_line, ntag_text = nameTagGeom(lat, lon, v_pos, name, tiles_epsg, min_xy, o3d_scene)
+                ntag_line, ntag_text = nameTagGeom(lat, lon, v_pos, name, font_size, tiles_epsg, min_xy, o3d_scene)
                 gfx_scene.add(ntag_line)
                 gfx_scene.add(ntag_text)
             
@@ -558,10 +559,8 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
 
                 progress.update(task1, advance=1)
 
-        print(f"...saving {gif_path}")
-        #iio.imwrite(gif_path, frames, duration=50, loop=1)
+        print(f"...saving {mp4_path}")
 
-        mp4_path = gif_path.replace('.gif', '.mp4')
         with imageio.get_writer(mp4_path, fps=30) as writer:
             for frame in frames:
                 writer.append_data(frame)
