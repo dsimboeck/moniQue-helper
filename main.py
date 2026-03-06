@@ -9,6 +9,7 @@ from monique_helper.io import load_tile_json, load_terrain, save_tif, save_png, 
 from monique_helper.transforms import alzeka2rot, R_ori2cv, alpha2azi
 from monique_helper.geom import plane_from_camera, img2square, nameTagGeom
 from osgeo import gdal, osr, ogr
+from osgeo.gdalconst import GA_Update
 import json
 import string
 import numpy as np
@@ -21,6 +22,8 @@ import base64
 from io import BytesIO
 import pandas as pd
 import imageio.v3 as iio
+from shapely.geometry import MultiPoint
+import geopandas as gpd
 import imageio
 import math
 
@@ -390,7 +393,7 @@ def render_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpkg
 
 @app.command()            
 def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpkg containing the oriented cameras.")],
-                out_dir: Annotated[str, typer.Argument(help="Path to save the .mp4 file. Must include the exeension.")],
+                out_dir: Annotated[str, typer.Argument(help="Directory to save the output .mp4-file at (file name is generated automatically).")],
                 padding:Annotated[float, typer.Option(help="Padding around historical image extent.")] = 1,
                 cam: Annotated[Optional[List[str]], typer.Option(help="Name of the cameras to create output for.")] = None,
                 dist_range: Annotated[Tuple[int, int, int, int], typer.Option(help="Rendering distance and step width; syntax: start stop min_step max_step")] = (1, 10000, 5, 500),
@@ -401,7 +404,7 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
     logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monique_helper", "myalpics_logo_black_text_trans_200px.png")
     logo_arr = np.array(Image.open(logo_path))
     
-    logo_alpha = logo_arr[:, :, -1] 
+    logo_alpha = logo_arr[:, :, -1]
     logo_alpha[logo_alpha > 0] = 255
     logo_alpha = logo_alpha / 255.
     
@@ -541,6 +544,7 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
         frames = []
 
         with Progress() as progress:
+
             task1 = progress.add_task("...rendering frames.", total=len(dist_range_variable))
 
             for dx, dist in enumerate(dist_range_variable):
@@ -564,8 +568,303 @@ def animate_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpk
         with imageio.get_writer(mp4_path, fps=30) as writer:
             for frame in frames:
                 writer.append_data(frame)
+                
         print("...done!")
-        
+
+@app.command()
+def viewshed(gpkg_path: Annotated[str, typer.Argument(help="Path to the *.gpkg containing the oriented cameras.")],
+             out_path: Annotated[str, typer.Argument(help="Path to the output GPKG which will store the calculate viewsheds.")],
+             pixel_size_m: Annotated[Optional[float], typer.Option(help="Path to the output GPKG which will store the calculate viewsheds.")] = 10,
+             cam: Annotated[Optional[List[str]], typer.Option(help="Name of the cameras to create output for.")] = None):
     
+    if os.path.exists(gpkg_path):
+        ds = ogr.Open(gpkg_path)
+        # gpkg_name = os.path.basename(gpkg_path).split(".")[0]
+    else:
+        raise typer.Exit("%s does not exists." % (gpkg_path))
+
+    # If the file handle is null then exit
+    if ds is None:
+        raise typer.Exit("Failed to load %s." % (gpkg_path))
+
+    if os.path.exists(out_path):
+        raise typer.Exit(f"{out_path} already exists. Delete first.")
+        
+    # Select the dataset to retrieve from the GeoPackage and assign it to an layer instance called lyr.
+    # The names of available datasets can be found in the gpkg_contents table.
+    reg_lyr = ds.GetLayer("region")
+    cam_lyr = ds.GetLayer("cameras")
+
+    # Refresh the reader
+    reg_lyr.ResetReading()
+    cam_lyr.ResetReading()
+
+    # for each feature in the layer, print the feature properties
+    reg_feat = reg_lyr.GetNextFeature()
+    reg_dict = reg_feat.items()
+
+    cam_dict = {}
+    for feat in cam_lyr:
+        feat_dict = feat.items()
+        if feat_dict["is_oriented"] == 1:
+            cam_dict[feat_dict["iid"]] = feat_dict
+    
+    print("Loading terrain...")
+    tiles_json = reg_dict["json_path"]
+    tiles_data = load_tile_json(tiles_json)
+    _, o3d_scene = load_terrain(tiles_data)
+    
+    # driver = ogr.GetDriverByName("MEMORY")
+    # outDatasource = driver.CreateDataSource("memData")
+    
+    # srs = osr.SpatialReference()
+    # srs.ImportFromEPSG(int(tiles_data["epsg"]))
+    
+    # cid_lyr = outDatasource.CreateLayer("vs", srs=srs)
+    # newField = ogr.FieldDefn('MYFLD', ogr.OFTInteger)
+    # cid_lyr.CreateField(newField)
+    
+    cid_hulls = []
+    
+    for cid, data in cam_dict.items():
+        if cam is not None:
+            if cid not in cam:
+                continue
+             
+        print("...rendering %s." % (cid))
+        prc = np.array([data["obj_x0"], data["obj_y0"], data["obj_z0"]]) 
+        prc_local = prc - np.array(tiles_data["min_xyz"])
+        
+        euler = np.array([data["alpha"], data["zeta"], data["kappa"]])
+        rmat = alzeka2rot(euler)
+        ior = np.array([data["img_x0"], data["img_y0"], data["f"]])
+        
+        cmat = np.array([[1, 0, -ior[0]],
+                         [0, 1, -ior[1]], 
+                         [0, 0, -ior[2]]])
+            
+        #sampling points
+        img_w = data["img_w"]
+        pnts_x = np.arange(0, img_w, step=1)
+        
+        img_h = data["img_h"]
+        pnts_y = np.arange(0, img_h, step=1)*(-1)
+               
+        xx, yy = np.meshgrid(pnts_x, pnts_y)
+        img_pnts = np.hstack((xx.reshape(-1, 1), yy.reshape(-1, 1), np.ones((len(pnts_x)*len(pnts_y),1))))  
+        
+        img_pnts_dir = rmat@cmat@img_pnts.T
+        img_pnts_dir = img_pnts_dir / np.linalg.norm(img_pnts_dir, axis=0)
+        
+        rays = np.hstack((np.tile(prc_local, (len(img_pnts), 1)), img_pnts_dir.T))
+        rays_o3d = o3d.core.Tensor(rays.astype(np.float32))
+        
+        ans = o3d_scene.cast_rays(rays_o3d)
+        ans_dist = ans["t_hit"].numpy()
+        ans_valid = np.isfinite(ans_dist)
+        
+        ans_coords = rays[:, 0:3] + rays[:, 3:]*ans_dist.reshape(-1, 1) + tiles_data["min_xyz"]
+        ans_coords = ans_coords[ans_valid.ravel(), :]
+        
+        pcl = o3d.geometry.PointCloud()
+        ans_coords[:, 2] = 0
+        pcl.points = o3d.utility.Vector3dVector(ans_coords)
+
+        print(pixel_size_m)
+        pcl_vxl = pcl.voxel_down_sample(pixel_size_m)    
+        vxl_coords = np.asarray(pcl_vxl.points)[:, :2]
+        
+        vxl_pnts = MultiPoint(vxl_coords)
+        vxl_gps = gpd.GeoSeries([vxl_pnts])
+        vxl_ch = vxl_gps.concave_hull(ratio=0.01, allow_holes=False)
+        cid_hulls.append([cid, vxl_ch.geometry[0]]) 
+        
+        # min_vxl_coords = np.min(vxl_coords, axis=0)
+        # max_vxl_coords = np.max(vxl_coords, axis=0)
+        
+        # nr_cols = int((max_vxl_coords[0] - min_vxl_coords[0]) / pixel_size_m)+1
+        # nr_rows = int((max_vxl_coords[1] - min_vxl_coords[1]) / pixel_size_m)+1
+                    
+        # vxl_arr = np.zeros((nr_rows, nr_cols), dtype=np.uint8)
+
+        # vxl_gix = (vxl_coords - min_vxl_coords)/pixel_size_m
+        # vxl_gix = vxl_gix.astype(np.uint16)
+        
+        # vxl_arr[vxl_gix[:, 1].ravel(), vxl_gix[:, 0].ravel()] = 1
+        # vxl_arr = np.flipud(vxl_arr)
+        
+        # # vxl_arr = morphology.binary_closing(vxl_arr.astype(bool), footprint=morphology.disk(2))
+        # # vxl_arr = morphology.remove_small_holes(vxl_arr.astype(bool), area_threshold=min_hole_px, connectivity=1)
+        # # vxl_arr = morphology.remove_small_objects(vxl_arr.astype(bool), min_size=min_size_px, connectivity=1)
+        
+        # vxl_gt = [min_vxl_coords[0]-pixel_size_m/2.,         #tl x
+        #           pixel_size_m,                           #res x
+        #           0,                                      #rot x
+        #           max_vxl_coords[1]+pixel_size_m/2.,      #tl y
+        #           0,                                      #rot y
+        #           pixel_size_m*(-1)]                     #res y
+        
+        # vxl_ds = gdal.GetDriverByName('MEM').Create('', nr_cols, nr_rows, 1, gdal.GDT_Byte)
+        # vxl_ds.SetGeoTransform(vxl_gt)
+        # vxl_ds.GetRasterBand(1).WriteArray(vxl_arr)
+        # vxl_ds.GetRasterBand(1).SetNoDataValue(0)
+        
+        # gdal.Polygonize(vxl_ds.GetRasterBand(1), vxl_ds.GetRasterBand(1), cid_lyr, 0, [], callback=None )
+        
+    gpd_cid_hulls = gpd.GeoDataFrame(cid_hulls, columns=["cid", "geom"], geometry="geom", crs=tiles_data["epsg"])
+    gpd_cid_hulls.to_file(out_path)
+    
+    # for feature in cid_lyr:
+    #     geom = feature.GetGeometryRef()
+    #     print(geom)
+
+@app.command()
+def orthophoto(gpkg_path: Annotated[str, typer.Argument(help="Path to the *.gpkg containing the oriented cameras.")],
+               out_dir: Annotated[str, typer.Argument(help="Path to the output GPKG which will store the calculate viewsheds.")],
+               pixel_size_m: Annotated[Optional[float], typer.Option(help="Path to the output GPKG which will store the calculate viewsheds.")] = 1,
+               cam: Annotated[Optional[List[str]], typer.Option(help="Name of the cameras to create output for.")] = None):
+    
+    if os.path.exists(gpkg_path):
+        ds = ogr.Open(gpkg_path)
+    else:
+        raise typer.Exit("%s does not exists." % (gpkg_path))
+
+    # If the file handle is null then exit
+    if ds is None:
+        raise typer.Exit("Failed to load %s." % (gpkg_path))
+
+    # if os.path.exists(out_path):
+    #     raise typer.Exit(f"{out_path} already exists. Delete first.")
+        
+    # Select the dataset to retrieve from the GeoPackage and assign it to an layer instance called lyr.
+    # The names of available datasets can be found in the gpkg_contents table.
+    reg_lyr = ds.GetLayer("region")
+    cam_lyr = ds.GetLayer("cameras")
+
+    # Refresh the reader
+    reg_lyr.ResetReading()
+    cam_lyr.ResetReading()
+
+    # for each feature in the layer, print the feature properties
+    reg_feat = reg_lyr.GetNextFeature()
+    reg_dict = reg_feat.items()
+
+    cam_dict = {}
+    for feat in cam_lyr:
+        feat_dict = feat.items()
+        if feat_dict["is_oriented"] == 1:
+            cam_dict[feat_dict["iid"]] = feat_dict
+    
+    print("Loading terrain...")
+    tiles_json = reg_dict["json_path"]
+    tiles_data = load_tile_json(tiles_json)
+    _, o3d_scene = load_terrain(tiles_data)
+        
+    # cid_hulls = []
+    
+    for cid, data in cam_dict.items():
+        if cam is not None:
+            if cid not in cam:
+                continue
+            
+        out_path = os.path.join(out_dir, cid + "_op.tif")
+        
+        img_path = data["path"]
+        img_ds = gdal.Open(img_path)
+        
+        img_w = img_ds.RasterXSize
+        img_h = img_ds.RasterYSize
+        img_d = img_ds.RasterCount
+
+        if img_d == 1:
+            img_arr = np.array(img_ds.GetRasterBand(1).ReadAsArray())
+            img_arr = np.dstack((img_arr, img_arr, img_arr))
+        elif img_d == 3:
+            img_b0 = np.array(img_ds.GetRasterBand(1).ReadAsArray())
+            img_b1 = np.array(img_ds.GetRasterBand(2).ReadAsArray())
+            img_b2 = np.array(img_ds.GetRasterBand(3).ReadAsArray())
+            img_arr = np.dstack((img_b0, img_b1, img_b2))
+
+        
+        print("...rendering %s." % (cid))
+        prc = np.array([data["obj_x0"], data["obj_y0"], data["obj_z0"]]) 
+        prc_local = prc - np.array(tiles_data["min_xyz"])
+        
+        euler = np.array([data["alpha"], data["zeta"], data["kappa"]])
+        rmat = alzeka2rot(euler)
+        ior = np.array([data["img_x0"], data["img_y0"], data["f"]])
+        
+        cmat = np.array([[1, 0, -ior[0]],
+                         [0, 1, -ior[1]], 
+                         [0, 0, -ior[2]]])
+            
+        #sampling points
+        pnts_x = np.arange(0, img_w, step=1)
+        pnts_y = np.arange(0, img_h, step=1)*(-1)
+        xx, yy = np.meshgrid(pnts_x, pnts_y)
+        img_pnts = np.hstack((xx.reshape(-1, 1), yy.reshape(-1, 1), np.ones((len(pnts_x)*len(pnts_y),1))))  
+        
+        img_pnts_dir = rmat@cmat@img_pnts.T
+        img_pnts_dir = img_pnts_dir / np.linalg.norm(img_pnts_dir, axis=0)
+        
+        rays = np.hstack((np.tile(prc_local, (len(img_pnts), 1)), img_pnts_dir.T))
+        rays_o3d = o3d.core.Tensor(rays.astype(np.float32))
+        
+        ans = o3d_scene.cast_rays(rays_o3d)
+        ans_dist = ans["t_hit"].numpy()
+        ans_valid = np.isfinite(ans_dist).ravel()
+        
+        ans_coords = rays[:, 0:3] + rays[:, 3:]*ans_dist.reshape(-1, 1) + tiles_data["min_xyz"]
+        ans_coords = ans_coords[ans_valid, :]
+        
+        ans_colors = img_arr.reshape(img_h*img_w, 3)
+        ans_colors = ans_colors[ans_valid, :]
+        
+        pcl = o3d.geometry.PointCloud()
+        ans_coords[:, 2] = 0
+        pcl.points = o3d.utility.Vector3dVector(ans_coords)
+        pcl.colors = o3d.utility.Vector3dVector(ans_colors)
+            
+        pcl_vxl = pcl.voxel_down_sample(pixel_size_m)    
+        vxl_coords = np.asarray(pcl_vxl.points)[:, :2]
+        vxl_colors = np.asarray(pcl_vxl.colors).astype(np.uint8)
+        vxl_colors[vxl_colors == 0] = 1
+        
+        min_vxl_coords = np.min(vxl_coords, axis=0)
+        max_vxl_coords = np.max(vxl_coords, axis=0)
+        
+        nr_cols = int((max_vxl_coords[0] - min_vxl_coords[0]) / pixel_size_m)+1
+        nr_rows = int((max_vxl_coords[1] - min_vxl_coords[1]) / pixel_size_m)+1
+                    
+        vxl_arr = np.zeros((nr_rows, nr_cols, 3), dtype=np.uint8)
+
+        vxl_gix = (vxl_coords - min_vxl_coords)/pixel_size_m
+        vxl_gix = vxl_gix.astype(np.uint16)
+        
+        vxl_arr[vxl_gix[:, 1].ravel(), vxl_gix[:, 0].ravel(), 0] = vxl_colors[:, 0]
+        vxl_arr[vxl_gix[:, 1].ravel(), vxl_gix[:, 0].ravel(), 1] = vxl_colors[:, 1]
+        vxl_arr[vxl_gix[:, 1].ravel(), vxl_gix[:, 0].ravel(), 2] = vxl_colors[:, 2]
+        vxl_arr = np.flipud(vxl_arr)
+        
+        vxl_gt = [min_vxl_coords[0]-pixel_size_m/2.,         #tl x
+                  pixel_size_m,                           #res x
+                  0,                                      #rot x
+                  max_vxl_coords[1]+pixel_size_m/2.,      #tl y
+                  0,                                      #rot y
+                  pixel_size_m*(-1)]                     #res y
+        
+        driver = gdal.GetDriverByName("GTiff")
+        outdata = driver.Create(out_path, nr_cols, nr_rows, 3, gdal.GDT_Byte)
+        outdata.SetProjection(tiles_data["epsg"])
+        outdata.SetGeoTransform(vxl_gt)
+        outdata.GetRasterBand(1).WriteArray(vxl_arr[:, :, 0])
+        outdata.GetRasterBand(2).WriteArray(vxl_arr[:, :, 1])
+        outdata.GetRasterBand(3).WriteArray(vxl_arr[:, :, 2])
+        outdata.GetRasterBand(1).SetNoDataValue(0)
+        outdata.GetRasterBand(2).SetNoDataValue(0)
+        outdata.GetRasterBand(3).SetNoDataValue(0)
+        outdata.FlushCache()    
+        
+
 if __name__ == "__main__":
     app()
