@@ -376,8 +376,8 @@ def render_gpkg(gpkg_path:Annotated[str, typer.Argument(help="Path to the *.gpkg
                                 "zeta":euler[1],
                                 "kappa":euler[2],
                                 "f":ior[2],                         
-                                "archive":data["archiv"] if "archiv" in list(data.keys()) else "AKON (OenB)",
-                                "copy": data["copy"] if "copy" in list(data.keys()) else "AKON/Österreichische Nationalbibliothek",
+                                "archive":data["archiv"] if "archiv" in list(data.keys()) else None,
+                                "copy": data["copy"] if "copy" in list(data.keys()) else None,
                                 "von":"%s-01-01" % (data["jahr"]) if "jahr" in list(data.keys()) else "1111-01-01",
                                 "bis":"%s-12-31" % (data["jahr"]) if "jahr" in list(data.keys()) else "1111-12-31"})
     
